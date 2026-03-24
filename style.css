@@ -380,7 +380,7 @@ body {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 16px;
 }
 
 /* Player cards */
@@ -390,12 +390,47 @@ body {
   border-radius: 3px;
   border: 2px solid var(--bronze);
   transition: all 0.3s;
+  opacity: 0.5;
+  filter: brightness(0.75);
+  position: relative;
 }
 .player-card.active {
   border-color: var(--gold);
-  box-shadow: 0 0 18px rgba(200,146,12,0.45);
-  background: rgba(245,230,200,1);
+  box-shadow: 0 0 28px rgba(200,146,12,0.8), 0 0 8px rgba(200,146,12,0.4);
+  background: rgba(255,245,210,1);
+  opacity: 1;
+  filter: brightness(1.08);
+  transform: scale(1.03);
 }
+
+/* YOUR TURN badge */
+.player-card.active::after {
+  content: '▶ YOUR TURN';
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--gold);
+  color: var(--terra-dark);
+  font-family: 'Cinzel Decorative', serif;
+  font-size: 0.38rem;
+  letter-spacing: 1.5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(200,146,12,0.6);
+  animation: badgePulse 0.8s ease-in-out infinite alternate;
+  z-index: 10;
+}
+/* AI turn badge */
+#card-p2.active::after {
+  content: '▶ AI TURN';
+}
+@keyframes badgePulse {
+  from { box-shadow: 0 2px 6px rgba(200,146,12,0.5); }
+  to   { box-shadow: 0 2px 14px rgba(200,146,12,1.0); }
+}
+
 .pcard-header {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
 }
@@ -489,6 +524,7 @@ body {
   height: min(55vh, 46vw, 420px);
   border: 2px solid var(--board-line);
   background: var(--board-bg);
+  position: relative;
 }
 
 /* Cells */
@@ -526,6 +562,18 @@ body {
 @keyframes cellPulse {
   from { box-shadow: inset 0 0 4px rgba(200,146,12,0.4); }
   to   { box-shadow: inset 0 0 14px rgba(200,146,12,0.9); }
+}
+
+/* Hover land highlight */
+.cell.hover-land {
+  background: rgba(200,146,12,0.35) !important;
+  box-shadow: inset 0 0 12px rgba(200,146,12,0.8);
+  animation: hoverLandPulse 0.6s ease-in-out infinite alternate;
+  z-index: 3;
+}
+@keyframes hoverLandPulse {
+  from { box-shadow: inset 0 0 6px rgba(200,146,12,0.5); }
+  to   { box-shadow: inset 0 0 18px rgba(200,146,12,1.0); }
 }
 
 /* Pieces */
@@ -574,6 +622,30 @@ body {
   width: 28px !important; height: 28px !important;
   font-size: 0.6rem !important;
   position: relative !important; cursor: pointer;
+}
+
+/* ══════════════ PATH SVG OVERLAY ══════════════ */
+.path-svg {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: 4;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.board.show-paths .path-svg {
+  opacity: 1;
+}
+
+.flow-path-p1, .flow-path-p2 {
+  stroke-dasharray: 12 12;
+  animation: pathFlow 1s linear infinite;
+}
+
+@keyframes pathFlow {
+  from { stroke-dashoffset: 24; }
+  to   { stroke-dashoffset: 0; }
 }
 
 /* ══════════════ DICE + LOG COLUMN ══════════════ */
@@ -704,16 +776,43 @@ body {
 
 /* ══════════════ TOAST ══════════════ */
 .toast {
-  position: fixed; bottom: 18px; left: 50%;
-  transform: translateX(-50%) translateY(10px);
-  background: rgba(92,32,16,0.97); border: 1px solid var(--bronze);
-  border-radius: 3px; padding: 7px 20px;
-  font-family: 'Crimson Pro', serif; font-size: 0.9rem; color: var(--parch);
-  z-index: 200; opacity: 0; transition: opacity 0.25s, transform 0.25s;
-  pointer-events: none; white-space: nowrap;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -40%) scale(0.8);
+  background: linear-gradient(135deg, #3a1a08 0%, #5c2010 100%);
+  border: 2px solid var(--gold);
+  border-radius: 8px;
+  padding: 14px 32px;
+  font-family: 'Cinzel Decorative', serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--gold-light);
+  text-align: center;
+  letter-spacing: 1px;
+  z-index: 500;
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.3s;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 0 24px rgba(200,146,12,0.4), 0 4px 16px rgba(0,0,0,0.5);
+  text-shadow: 0 0 8px rgba(200,146,12,0.5);
 }
-.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
 
+/* Toast overlay — dims background when toast shows */
+.toast-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 499;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+.toast-overlay.show { opacity: 1; }
 /* ══════════════ WIN SCREEN ══════════════ */
 .win-panel {
   position: relative; z-index: 2;

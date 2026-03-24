@@ -110,7 +110,7 @@ function rollBoth() {
   const d1 = rollDie();
   const sum = d1;
   const isDhaayam   = d1 === 1;
-  const isExtraTurn = d1 === 1 || d1 === 5 || d1 === 6;
+  const isExtraTurn = false; // extra turn only for capture now
   const moveValue   = d1;
   return { d1, d2: 0, sum, isDhaayam, isExtraTurn, moveValue };
 }
@@ -196,6 +196,11 @@ function canMove(piece, roll, st) {
   const track = TRACKS[piece.pid];
   const newIdx = piece.trackIdx + roll.moveValue;
   if (newIdx >= track.length) return false;  // overshoot — need exact count
+
+  // Must capture to enter inner ring
+  if (piece.trackIdx <= 20 && newIdx >= 21 && st.captureCount[piece.pid] === 0) {
+    return false;
+  }
 
   // Safe square → Safe square not allowed
   const newPos = track[newIdx];
@@ -290,13 +295,51 @@ function buildBoard() {
       if (key === HOME_POS) el.classList.add('center');
       else if (SAFE_SQUARES.has(key)) el.classList.add('safe');
 
-      // Click handler for moving on highlighted cells
       el.addEventListener('click', () => onCellClick(key));
-
       board.appendChild(el);
       cellEls[key] = el;
     }
   }
+  drawPathsSVG();
+}
+
+function drawPathsSVG() {
+  const getPoints = (track, offset) => {
+    return track.map(pos => {
+      const [r, c] = pos.split(',').map(Number);
+      return `${(c - 1) * 100 + 50 + offset},${(r - 1) * 100 + 50 + offset}`;
+    }).join(' ');
+  };
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('id', 'pathSvg');
+  svg.setAttribute('class', 'path-svg');
+  svg.setAttribute('viewBox', '0 0 700 700');
+  
+  svg.innerHTML = `
+    <defs>
+      <marker id="startP1" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6">
+        <circle cx="5" cy="5" r="4" fill="rgba(192, 57, 43, 1)" />
+      </marker>
+      <marker id="endP1" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 2 L 8 5 L 0 8 z" fill="rgba(192, 57, 43, 1)" />
+      </marker>
+      <marker id="startP2" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6">
+        <circle cx="5" cy="5" r="4" fill="rgba(26, 26, 46, 1)" />
+      </marker>
+      <marker id="endP2" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 2 L 8 5 L 0 8 z" fill="rgba(26, 26, 46, 1)" />
+      </marker>
+    </defs>
+    <!-- Background solid paths with low opacity -->
+    <polyline points="${getPoints(TRACKS.p1, -12)}" fill="none" stroke="rgba(192, 57, 43, 0.25)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    <polyline points="${getPoints(TRACKS.p2, 12)}" fill="none" stroke="rgba(26, 26, 46, 0.25)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <!-- Animated dashed paths with start/end markers -->
+    <polyline class="flow-path-p1" points="${getPoints(TRACKS.p1, -12)}" fill="none" stroke="rgba(192, 57, 43, 0.9)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" marker-start="url(#startP1)" marker-end="url(#endP1)" />
+    <polyline class="flow-path-p2" points="${getPoints(TRACKS.p2, 12)}" fill="none" stroke="rgba(26, 26, 46, 0.9)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" marker-start="url(#startP2)" marker-end="url(#endP2)" />
+  `;
+  document.getElementById('gameBoard').appendChild(svg);
 }
 
 function renderPieces() {
@@ -415,12 +458,17 @@ function updateScoreboard() {
 
 // ─── TOAST ───────────────────────────────────────────────
 let toastTimer = null;
-function toast(msg, dur = 2400) {
+function toast(msg, dur = 1000) {
   const el = document.getElementById('toast');
+  const overlay = document.getElementById('toastOverlay');
   el.textContent = msg;
   el.classList.add('show');
+  if (overlay) overlay.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), dur);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    if (overlay) overlay.classList.remove('show');
+  }, dur);
 }
 
 // ─── DICE ANIMATION ──────────────────────────────────────
@@ -457,8 +505,117 @@ function animateDice(d1, d2, cb) {
 }
 
 // ─── TURN ENGINE ─────────────────────────────────────────
-// Player 1 (Human): clicks LEFT column freely — any number to move
-// Player 2 (AI):    rolls dice automatically, moves automatically
+// ─── AI ENGINE ───────────────────────────────────────────
+let selectedDiff = 'medium';
+
+const AI = {
+  pickNumber(pieces) {
+    // AI picks from full available numbers [1,2,3,4,6,8]
+    // Check which numbers still have unblocked boxes in right column
+    const available = [];
+    const seen = new Set();
+    document.querySelectorAll('.outer-die-num[data-die="2"]').forEach(el => {
+      if (!el.classList.contains('blocked')) {
+        const v = parseInt(el.dataset.val);
+        if (!seen.has(v)) { seen.add(v); available.push(v); }
+      }
+    });
+
+    // If all blocked, use full list (failsafe)
+    const nums = available.length ? available : [1, 2, 3, 4, 6, 8];
+
+    if (selectedDiff === 'easy') {
+      return nums[Math.floor(Math.random() * nums.length)];
+    }
+
+    // Score each number
+    const scores = nums.map(val => {
+      const isDhaayam = val === 1;
+      const isExtraTurn = false;
+      const roll = { d1: val, d2: 0, sum: val, isDhaayam, isExtraTurn, moveValue: val };
+      const movable = pieces.filter(p => canMove(p, roll, G));
+      if (!movable.length) return { val, score: -1 };
+
+      let best = 0;
+      for (const p of movable) {
+        let s = 0;
+        const track = TRACKS['p2'];
+        const newIdx = p.isHome ? 0 : p.trackIdx + val;
+        if (newIdx < track.length) {
+          const newPos = track[newIdx];
+          if (!SAFE_SQUARES.has(newPos)) {
+            const enemies = G.pieces['p1'].filter(e => !e.isHome && !e.isDone && e.pos === newPos);
+            if (enemies.length) s += selectedDiff === 'hard' ? 100 : 60;
+          }
+          if (newPos === '4,4') s += 80;
+          s += newIdx;
+          if (selectedDiff === 'hard' && !SAFE_SQUARES.has(newPos)) {
+            const danger = G.pieces['p1'].filter(e => !e.isHome && !e.isDone).some(e => {
+              for (let mv of [1,2,3,4,6,8]) {
+                const ni = e.trackIdx + mv;
+                if (ni < TRACKS['p1'].length && TRACKS['p1'][ni] === newPos) return true;
+              }
+              return false;
+            });
+            if (danger) s -= 40;
+          }
+        }
+        if (s > best) best = s;
+      }
+      if (selectedDiff === 'medium' && Math.random() < 0.3) {
+        return { val, score: Math.random() * 50 };
+      }
+      return { val, score: best };
+    });
+
+    scores.sort((a, b) => b.score - a.score);
+    // Pick best scoring number that has moves, fallback to any
+    const best = scores.find(s => s.score >= 0) || scores[0];
+    return best.val;
+  },
+
+  pickPiece(pieces, roll) {
+    const movable = pieces.filter(p => canMove(p, roll, G));
+    if (!movable.length) return null;
+
+    if (selectedDiff === 'easy') {
+      return movable[Math.floor(Math.random() * movable.length)];
+    }
+
+    let best = null, bestScore = -Infinity;
+    for (const p of movable) {
+      let s = 0;
+      const track = TRACKS['p2'];
+      const newIdx = p.isHome ? 0 : p.trackIdx + roll.moveValue;
+      if (newIdx < track.length) {
+        const newPos = track[newIdx];
+        if (!SAFE_SQUARES.has(newPos)) {
+          const enemies = G.pieces['p1'].filter(e => !e.isHome && !e.isDone && e.pos === newPos);
+          if (enemies.length) s += selectedDiff === 'hard' ? 100 : 60;
+        }
+        if (newPos === '4,4') s += 80;
+        s += newIdx;
+        if (selectedDiff === 'hard' && !SAFE_SQUARES.has(newPos)) {
+          const danger = G.pieces['p1'].filter(e => !e.isHome && !e.isDone).some(e => {
+            const eTrack = TRACKS['p1'];
+            for (let mv of [1,2,3,4,6,8]) {
+              const ni = e.trackIdx + mv;
+              if (ni < eTrack.length && eTrack[ni] === newPos) return true;
+            }
+            return false;
+          });
+          if (danger) s -= 40;
+        }
+      }
+      if (p.isHome) s = 30;
+      if (s > bestScore) { bestScore = s; best = p; }
+    }
+    return best;
+  }
+};
+
+// Player 1 (Human): clicks LEFT column
+// Player 2 (AI):    picks number and piece automatically
 
 function startTurn() {
   G.rolled = false;
@@ -475,39 +632,67 @@ function startTurn() {
   document.getElementById('diceMsg').textContent = '';
 
   const pid = G.turn;
-  const pname = pid === 'p1' ? 'Player 1 🔴' : 'Player 2 ⚫';
-  const col = pid === 'p1' ? 'left' : 'right';
-  log(`── ${pname}'s turn ──`, 'sys');
-  document.getElementById('diceMsg').textContent = `${pname}: click a number on the ${col} to move`;
   Sound.turn();
-  enableLeftColumn(true);
+
+  if (pid === 'p1') {
+    log(`── Your turn (Player 1 🔴) ──`, 'sys');
+    document.getElementById('diceMsg').textContent = 'Your turn! Click a number on the left to move.';
+    enableLeftColumn(true);
+  } else {
+    log(`── AI's turn (Player 2 ⚫) ──`, 'sys');
+    document.getElementById('diceMsg').textContent = 'AI is thinking…';
+    enableLeftColumn(false);
+    setTimeout(() => executeAITurn(), 1000 + Math.random() * 600);
+  }
+}
+
+function executeAITurn() {
+  if (!G || G.over || G.turn !== 'p2') return;
+
+  const chosenVal = AI.pickNumber(G.pieces['p2']);
+  if (chosenVal === null) {
+    toast('AI skips — no moves!');
+    setTimeout(() => nextTurn(false), 1000);
+    return;
+  }
+
+  // Block one box of the chosen number in right column if available
+  const boxes = [...document.querySelectorAll(`.outer-die-num[data-die="2"][data-val="${chosenVal}"]`)]
+    .filter(el => !el.classList.contains('blocked'));
+  if (boxes.length > 0) {
+    boxes[0].classList.add('blocked');
+    boxes[0].style.pointerEvents = 'none';
+  }
+
+  const isDhaayam   = chosenVal === 1;
+  const isExtraTurn = false;
+  const roll = { d1: chosenVal, d2: 0, sum: chosenVal, isDhaayam, isExtraTurn, moveValue: chosenVal };
+
+  G.roll = roll;
+  G.rolled = true;
+
+  document.getElementById('dface1').textContent = chosenVal;
+  document.getElementById('diceTotal').textContent = `${chosenVal}`;
+  const msg = isDhaayam ? `🔓 AI DHAAYAM! (${chosenVal})` : `AI chose ${chosenVal}`;
+  document.getElementById('diceMsg').textContent = msg;
+  log(`🤖 AI chose ${chosenVal}${isDhaayam ? ' 🔓' : ''}${isExtraTurn && !isDhaayam ? ' ⭐' : ''}`, 'p2');
+  Sound.move();
+
+  setTimeout(() => afterRoll(), 700);
 }
 
 function enableLeftColumn(enabled) {
-  const pid = G ? G.turn : 'p1';
-  if (pid === 'p1') {
-    // Player 1 uses LEFT column
-    document.querySelectorAll('.outer-die-num[data-die="1"]').forEach(el => {
-      if (el.classList.contains('blocked')) return;
-      el.style.pointerEvents = enabled ? 'auto' : 'none';
-      el.style.opacity = '1';
-    });
-    document.querySelectorAll('.outer-die-num[data-die="2"]').forEach(el => {
-      el.style.pointerEvents = 'none';
-      el.style.opacity = '1';
-    });
-  } else {
-    // Player 2 uses RIGHT column
-    document.querySelectorAll('.outer-die-num[data-die="2"]').forEach(el => {
-      if (el.classList.contains('blocked')) return;
-      el.style.pointerEvents = enabled ? 'auto' : 'none';
-      el.style.opacity = '1';
-    });
-    document.querySelectorAll('.outer-die-num[data-die="1"]').forEach(el => {
-      el.style.pointerEvents = 'none';
-      el.style.opacity = '1';
-    });
-  }
+  // Player 1 uses LEFT column only
+  document.querySelectorAll('.outer-die-num[data-die="1"]').forEach(el => {
+    if (el.classList.contains('blocked')) return;
+    el.style.pointerEvents = enabled ? 'auto' : 'none';
+    el.style.opacity = '1';
+  });
+  // Right column always disabled for human
+  document.querySelectorAll('.outer-die-num[data-die="2"]').forEach(el => {
+    el.style.pointerEvents = 'none';
+    el.style.opacity = '1';
+  });
 }
 
 function enableDieColumns(enabled, highlightVal) {
@@ -518,41 +703,34 @@ function enableDieColumns(enabled, highlightVal) {
   });
 }
 
-// Player clicks a number in the LEFT column → that's their move
-// Each number has 2 boxes — clicking one blocks it permanently
+// Player 1 clicks a number in LEFT column
 function onDieNumClick(die, val, boxEl) {
   if (!G || G.over) return;
+  if (G.turn !== 'p1') return;
+  if (die !== '1') return;
   if (G.rolled) return;
   if (boxEl.classList.contains('blocked')) return;
 
-  // Player 1 uses left column (die=1), Player 2 uses right column (die=2)
-  if (G.turn === 'p1' && die !== '1') return;
-  if (G.turn === 'p2' && die !== '2') return;
-
-  // Block the clicked box permanently
   boxEl.classList.add('blocked');
   boxEl.style.pointerEvents = 'none';
 
   const moveVal = parseInt(val);
   const isDhaayam   = moveVal === 1;
-  const isExtraTurn = moveVal === 1 || moveVal === 6 || moveVal === 8;
+  const isExtraTurn = false;
   const roll = { d1: moveVal, d2: 0, sum: moveVal, isDhaayam, isExtraTurn, moveValue: moveVal };
 
   G.roll = roll;
   G.rolled = true;
 
-  // Disable the current player's column (move has been chosen)
-  const activeDie = G.turn === 'p1' ? '1' : '2';
-  document.querySelectorAll(`.outer-die-num[data-die="${activeDie}"]`).forEach(el => {
+  document.querySelectorAll('.outer-die-num[data-die="1"]').forEach(el => {
     el.style.pointerEvents = 'none';
   });
 
-  const pname = G.turn === 'p1' ? 'Player 1' : 'Player 2';
   document.getElementById('dface1').textContent = moveVal;
   document.getElementById('diceTotal').textContent = `${moveVal}`;
-  let msg = isDhaayam ? '🔓 DHAAYAM! Click a piece to enter!' : isExtraTurn ? `⭐ ${moveVal} — extra turn!` : `Move ${moveVal} steps — click a piece!`;
+  let msg = isDhaayam ? '🔓 DHAAYAM! Click a piece to enter!' : `Move ${moveVal} steps — click a piece!`;
   document.getElementById('diceMsg').textContent = msg;
-  log(`🎯 ${pname} chose ${moveVal}${isDhaayam ? ' 🔓' : ''}${isExtraTurn && !isDhaayam ? ' ⭐' : ''}`, G.turn);
+  log(`🎯 You chose ${moveVal}${isDhaayam ? ' 🔓' : ''}${isExtraTurn && !isDhaayam ? ' ⭐' : ''}`, 'p1');
   Sound.move();
 
   afterRoll();
@@ -564,7 +742,11 @@ function afterRoll() {
   const movable = G.pieces[pid].filter(p => canMove(p, roll, G));
 
   if (!movable.length) {
-    // Check if safe→safe rule is blocking pieces
+    const captureBlocked = G.pieces[pid].filter(p => 
+      !p.isHome && !p.isDone &&
+      p.trackIdx <= 20 && (p.trackIdx + roll.moveValue) >= 21 &&
+      G.captureCount[pid] === 0
+    );
     const safeBlocked = G.pieces[pid].filter(p =>
       !p.isHome && !p.isDone &&
       SAFE_SQUARES.has(p.pos) &&
@@ -574,25 +756,37 @@ function afterRoll() {
         return newIdx < track.length && SAFE_SQUARES.has(track[newIdx]);
       })()
     );
-    if (safeBlocked.length > 0) {
+
+    if (captureBlocked.length > 0) {
+      log('⛔ Invalid move! Must capture to enter inner ring.', 'sys');
+      toast('⛔ Need a capture to enter inner ring!', 1500);
+    } else if (safeBlocked.length > 0) {
       log('⛔ Invalid move! Safe square → Safe square not allowed.', 'sys');
-      toast('⛔ Invalid! Safe square → Safe square not allowed!', 3000);
+      toast('⛔ Invalid! Safe square → Safe square not allowed!', 1000);
     } else {
       log('No moves available. Turn passes.', 'sys');
       toast('No moves! Turn passes.');
     }
-    setTimeout(() => nextTurn(false), 2000);
+    setTimeout(() => nextTurn(false), 1000);
     return;
   }
 
-  // Both players are human — highlight pieces and wait for click
-  pendingPieces = movable;
-  highlightMovable(movable);
-  if (roll.isDhaayam && movable.some(p => p.isHome)) {
-    const pname = pid === 'p1' ? 'Player 1' : 'Player 2';
-    toast(`🔓 DHAAYAM! ${pname} click a home piece to enter!`, 3000);
+  if (pid === 'p1') {
+    // Human — highlight and wait for click
+    pendingPieces = movable;
+    highlightMovable(movable);
+    if (roll.isDhaayam && movable.some(p => p.isHome)) {
+      toast('🔓 DHAAYAM! Click a home piece to enter!', 1000);
+    }
+    updateCards();
+  } else {
+    // AI picks piece
+    setTimeout(() => {
+      const chosen = AI.pickPiece(G.pieces['p2'], roll);
+      if (chosen) doMove(chosen);
+      else nextTurn(false);
+    }, 700);
   }
-  updateCards();
 }
 
 // Simple AI: prefers captures > entering > advancing furthest piece
@@ -608,23 +802,21 @@ function doMove(piece) {
   setTimeout(() => {
     const result = applyMove(piece, G.roll);
     const pid = piece.pid;
-    const name = pid === 'p1' ? 'Player 1' : 'Player 2';
-    let extraTurn = G.roll.isExtraTurn;
+    const name = pid === 'p1' ? 'You' : 'AI';
+    let extraTurn = false; // extra turn only on capture
 
     if (result.type === 'enter') {
       log(`🔓 ${name} entered piece ${piece.slot+1}`, pid);
-      toast(`🔓 ${name} piece ${piece.slot+1} on the board!`);
+      toast(pid === 'p1' ? `🔓 Piece ${piece.slot+1} on the board!` : `🤖 AI entered a piece!`);
     } else if (result.type === 'done') {
       log(`🏠 ${name}'s piece ${piece.slot+1} reached HOME! 🎉`, pid);
-      toast(`🏠 ${name} piece reached center! Score x4! 🎉`);
-      // Multiply total score by 4 when piece reaches home
+      toast(pid === 'p1' ? '🏠 Your piece reached center! Score x4! 🎉' : '⚠️ AI got a piece home!');
       G.score[pid] = G.score[pid] * 4;
-      extraTurn = true;
+      // No extra turn for reaching home
     } else {
       log(`♟ ${name} moved piece ${piece.slot+1} → ${piece.pos}`, pid);
     }
 
-    // Update score — add steps moved (only for non-home moves)
     if (result.type !== 'done') {
       G.score[pid] += G.roll.moveValue;
     }
@@ -634,25 +826,29 @@ function doMove(piece) {
       Sound.capture();
       extraTurn = true;
       result.captured.forEach(cp => {
-        const capName = cp.pid === 'p1' ? 'Player 1' : 'Player 2';
-        log(`💥 ${name} captured ${capName}'s piece ${cp.slot+1}!`, 'sys');
-        // Decrease captured player's score by the steps that piece had moved
+        const capName = cp.pid === 'p1' ? 'your' : "AI's";
+        log(`💥 ${name} captured ${capName} piece ${cp.slot+1}!`, 'sys');
         const stepsLost = cp.stepsAtCapture || 0;
         G.score[cp.pid] = Math.max(0, G.score[cp.pid] - stepsLost);
       });
-      toast(`💥 ${name} captured! Extra turn!`, 2500);
+      if (pid === 'p1') toast('💥 You captured AI! Extra turn!', 1000);
+      else {
+        const boosts = ["💪 Stay strong! Come back fiercer!", "🔥 Don't give up — fight back!", "⚡ Use this as fuel. Rise up!", "🌟 The board isn't over yet!"];
+        toast(boosts[Math.floor(Math.random()*boosts.length)], 1000);
+      }
       updateScoreboard();
     }
 
     if (!piece.isHome && !piece.isDone && SAFE_SQUARES.has(piece.pos) && result.type !== 'enter') {
       Sound.safe();
-      toast(`🛡️ ${name} on safe square!`, 2000);
+      if (pid === 'p1') toast('🛡️ Safe square!', 1000);
     }
 
-    if (extraTurn && result.type !== 'done') {
+    if (extraTurn) {
       Sound.extra();
       log(`⭐ ${name} gets an extra turn!`, 'sys');
-      toast(`⭐ ${name} gets an extra turn!`);
+      if (pid === 'p1') toast('⭐ Extra turn!');
+      else toast('⚠️ AI gets an extra turn!');
     }
 
     renderPieces();
@@ -689,27 +885,25 @@ function setRollBtn(enabled) {
 // ─── CLICK HANDLERS ──────────────────────────────────────
 function onPieceClick(id) {
   if (!G || G.over) return;
+  if (G.turn !== 'p1') return;
   if (!G.rolled || !pendingPieces.length) return;
 
-  const pid = G.turn;
-  const piece = G.pieces[pid].find(p => p.id === id);
+  const piece = G.pieces['p1'].find(p => p.id === id);
   if (!piece) return;
 
   if (!pendingPieces.some(p => p.id === id)) {
-    // Check if specifically a safe→safe violation
     if (!piece.isHome && !piece.isDone && G.roll) {
-      const track = TRACKS[pid];
+      const track = TRACKS['p1'];
       const newIdx = piece.trackIdx + G.roll.moveValue;
       if (newIdx < track.length) {
         const newPos = track[newIdx];
         if (SAFE_SQUARES.has(piece.pos) && SAFE_SQUARES.has(newPos)) {
-          toast('🚫 Invalid! Safe square → Safe square not allowed!', 2500);
-          log('🚫 Invalid! Cannot move from one safe square to another.', 'sys');
+          toast('🚫 Invalid! Safe square → Safe square not allowed!', 1000);
           return;
         }
       }
     }
-    toast("That piece can't move right now!", 1200);
+    toast("That piece can't move right now!", 1000);
     return;
   }
   doMove(piece);
@@ -725,18 +919,16 @@ function showWin(winner) {
   G.winner = winner;
   Sound.win();
 
-  const wname = winner === 'p1' ? 'Player 1 🔴' : 'Player 2 ⚫';
-  document.getElementById('winTrophy').textContent = '🏆';
-  document.getElementById('winTitle').textContent  = `${wname} Wins!`;
-  document.getElementById('winMsg').textContent = `${wname} mastered the ancient board of Dhaayam!`;
+  const isHuman = winner === 'p1';
+  document.getElementById('winTrophy').textContent = isHuman ? '🏆' : '💀';
+  document.getElementById('winTitle').textContent  = isHuman ? 'You Win!' : 'AI Wins!';
+  const defeatMsgs = ["Don't worry — every master was once a beginner! 💪", "The AI won this round. Come back stronger! 🔥", "Defeat is the first step to mastery! ⚡", "You fought well! Next time victory is yours! 🌟"];
+  document.getElementById('winMsg').textContent = isHuman ? 'You outsmarted the AI in Dhaayam!' : defeatMsgs[Math.floor(Math.random()*defeatMsgs.length)];
 
   const p1done = G.pieces.p1.filter(p => p.isDone).length;
   const p2done = G.pieces.p2.filter(p => p.isDone).length;
   document.getElementById('winStats').innerHTML =
-    `Player 1 pieces home: ${p1done}/4<br>` +
-    `Player 2 pieces home: ${p2done}/4<br>` +
-    `Total turns: ${G.turnCount}<br>` +
-    `P1 captures: ${G.captureCount.p1} · P2 captures: ${G.captureCount.p2}`;
+    `Your pieces home: ${p1done}/4<br>AI pieces home: ${p2done}/4<br>Total turns: ${G.turnCount}<br>Your captures: ${G.captureCount.p1} · AI captures: ${G.captureCount.p2}`;
 
   showScreen('win-screen');
 }
@@ -769,6 +961,15 @@ function startGame() {
 // ─── EVENT LISTENERS ─────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
 
+  // Difficulty
+  document.querySelectorAll('.diff-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedDiff = btn.dataset.diff;
+    });
+  });
+
   // Start
   document.getElementById('startBtn').addEventListener('click', startGame);
 
@@ -781,7 +982,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (confirm('Return to menu? Current game will be lost.')) showScreen('home-screen');
   });
 
-  // Roll button — hidden (AI rolls automatically, human uses left column)
+  // Roll button hidden
   const rollBtn = document.getElementById('rollBtn');
   if (rollBtn) rollBtn.style.display = 'none';
 
@@ -789,17 +990,65 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('soundBtn').addEventListener('click', () => {
     const on = Sound.toggle();
     document.getElementById('soundBtn').textContent = on ? '🔊' : '🔇';
-    toast(on ? 'Sound ON 🔊' : 'Sound OFF 🔇', 1200);
+    toast(on ? 'Sound ON 🔊' : 'Sound OFF 🔇', 1000);
   });
+
+  // Path Toggle
+  const pathBtn = document.getElementById('pathBtn');
+  if (pathBtn) {
+    pathBtn.addEventListener('click', () => {
+      const board = document.getElementById('gameBoard');
+      board.classList.toggle('show-paths');
+      const isShowing = board.classList.contains('show-paths');
+      pathBtn.textContent = isShowing ? '🚫 Hide Path' : '🗺️ Show Path';
+      pathBtn.style.color = isShowing ? 'var(--p1)' : 'var(--parch)';
+    });
+  }
 
   // Win screen
   document.getElementById('playAgainBtn').addEventListener('click', startGame);
   document.getElementById('menuBtn').addEventListener('click', () => showScreen('home-screen'));
 
-  // Die column clicks — left column for Player 1
+  // Die column clicks — left column for Player 1 only
   document.querySelectorAll('.outer-die-num').forEach(el => {
     el.addEventListener('click', () => {
       onDieNumClick(el.dataset.die, el.dataset.val, el);
+    });
+
+    // Hover: highlight where piece would land on board
+    el.addEventListener('mouseenter', () => {
+      if (!G || G.over || G.rolled) return;
+      if (G.turn !== 'p1' || el.dataset.die !== '1') return;
+      if (el.classList.contains('blocked')) return;
+
+      const moveVal = parseInt(el.dataset.val);
+      const isDhaayam = moveVal === 1;
+      const roll = { d1: moveVal, d2: 0, sum: moveVal, isDhaayam, isExtraTurn: false, moveValue: moveVal };
+
+      // Find all movable pieces and highlight their landing cells
+      G.pieces['p1'].forEach(piece => {
+        if (piece.isDone) return;
+        if (piece.isHome) {
+          if (isDhaayam) {
+            // Would enter at track index 0
+            const landPos = TRACKS['p1'][0];
+            const cell = cellEls[landPos];
+            if (cell) cell.classList.add('hover-land');
+          }
+          return;
+        }
+        const newIdx = piece.trackIdx + moveVal;
+        if (newIdx < TRACKS['p1'].length) {
+          const landPos = TRACKS['p1'][newIdx];
+          const cell = cellEls[landPos];
+          if (cell) cell.classList.add('hover-land');
+        }
+      });
+    });
+
+    el.addEventListener('mouseleave', () => {
+      // Remove all hover highlights
+      document.querySelectorAll('.cell.hover-land').forEach(c => c.classList.remove('hover-land'));
     });
   });
 });
